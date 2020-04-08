@@ -3,13 +3,15 @@
 #include <arpa/inet.h>
 #include <dirent.h>
 #include <future>
-#include <getopt.h>
 #include <mutex>
 #include <stdio.h>
 #include <thread>
 #include <unistd.h>
 #include <utility>
 #include <vector>
+
+#include <boost/program_options.hpp>
+#include <iostream>
 
 // Well within MTU
 #define PACKET_SIZE 1024
@@ -346,46 +348,52 @@ int main(int argc, char **argv) {
 
   sockaddr_in connect_addr{};
 
-  static option long_options[] = {{"help", no_argument, nullptr, 'h'},
-                                  {"listen", required_argument, nullptr, 'l'},
-                                  {"cache", required_argument, nullptr, 'c'},
-                                  {"network", required_argument, nullptr, 'n'},
-                                  {nullptr, 0, nullptr, 0}};
-  while (true) {
-    int option_index = 0;
-    int c = getopt_long(argc, argv, "hl:c:n:", long_options, &option_index);
-    if (c == -1) {
-      break;
-    }
+  using namespace boost::program_options;
+  try {
+    options_description desc{"Options"};
+    desc.add_options()
+        ("help,h", "Show help")
+        ("port,p", value<unsigned short>()->notifier([&](auto value) {
+          listen = true;
+          listen_port = value;
+        }), "Listen on the given port instead of connecting")
+        ("cache,c", value<std::string>()->notifier([&](auto value) {
+          temp_cache = false;
+          cache_dir = value;
+        }), "Use the following directory for caching credentials")
+        ("network,n", value<std::string>()->notifier([&](auto value) {
+          sscanf(value.c_str(), "%llx", &nwid);
+        }), "Join this network instead of Earth")
+        ;
 
-    switch (c) {
-    case '?':
-    case 'h':
-    default:
+    command_line_parser parser{argc, argv};
+    parser.options(desc);
+    parsed_options parsed = parser.run();
+
+    variables_map vm;
+    store(parsed, vm);
+    notify(vm);
+
+    if (vm.count("help")) {
       print_usage(argv[0]);
       return 0;
-    case 'l':
-      listen = true;
-      listen_port = atoi(optarg);
-      break;
-    case 'c':
-      temp_cache = false;
-      cache_dir = optarg;
-      break;
-    case 'n':
-      sscanf(optarg, "%llx", &nwid);
-      break;
     }
-  }
 
-  if (!listen) {
-    if (argc < optind + 2) {
-      print_usage(argv[0]);
-      return -2;
+    if (!listen) {
+      auto extras = collect_unrecognized(parsed.options, include_positional);
+
+      if (extras.size() < 2) {
+        print_usage(argv[0]);
+        return -1;
+      }
+
+      inet_pton(AF_INET, extras[0].c_str(), &connect_addr.sin_addr);
+      connect_addr.sin_family = AF_INET;
+      connect_addr.sin_port = htons(atoi(extras[1].c_str()));
     }
-    inet_pton(AF_INET, argv[optind], &connect_addr.sin_addr);
-    connect_addr.sin_family = AF_INET;
-    connect_addr.sin_port = htons(atoi(argv[optind + 1]));
+  } catch (const error &ex) {
+    std::cerr << ex.what() << std::endl;
+    return -1;
   }
 
   if (temp_cache) {
