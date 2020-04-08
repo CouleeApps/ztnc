@@ -2,8 +2,13 @@
 Send files across networks with minimal configuration.
 
 ## Building
-Requires a C++14 compatible compiler.  
+Requires a C++14 compatible compiler and Boost.
+
+### macOS and Linux
 `mkdir build && cmake -B ./build . && cmake --build ./build`
+
+### Windows
+Not supported currently. Libzt does not support MSVC (or at least has errors).  
 
 ## Usage
 Client: `ztnc [-n <network id>] [-c <cache dir>] <address> <port>`  
