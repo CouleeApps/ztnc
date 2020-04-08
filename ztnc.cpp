@@ -1,17 +1,21 @@
 
 #include "ZeroTier.h"
-#include <arpa/inet.h>
-#include <dirent.h>
+#include <cstdio>
 #include <future>
 #include <mutex>
-#include <stdio.h>
 #include <thread>
-#include <unistd.h>
 #include <utility>
 #include <vector>
+#include <iostream>
+
+#ifdef _WIN32
+#include <ws2def.h>
+#else
+#include <arpa/inet.h>
+#endif
 
 #include <boost/program_options.hpp>
-#include <iostream>
+#include <boost/filesystem.hpp>
 
 // Well within MTU
 #define PACKET_SIZE 1024
@@ -291,7 +295,7 @@ void echo_server_client(int fd) {
     char buf[PACKET_SIZE];
     ssize_t length;
     while ((length = zts_read(fd, buf, PACKET_SIZE)) > 0) {
-      write(STDOUT_FILENO, buf, length);
+      fwrite(buf, 1, length, stdout);
     }
     zts_close(fd);
     threadList.on_message(true);
@@ -303,7 +307,7 @@ void echo_server_client(int fd) {
     char buf[PACKET_SIZE];
     ssize_t length;
 
-    while ((length = read(STDIN_FILENO, buf, PACKET_SIZE)) > 0) {
+    while ((length = fread(buf, 1, PACKET_SIZE, stdin)) > 0) {
       buf[length] = 0;
       if (zts_write(fd, buf, length) != length) {
         perror("zts_write");
@@ -397,9 +401,8 @@ int main(int argc, char **argv) {
   }
 
   if (temp_cache) {
-    char templ[] = "/tmp/ztnc_cache.XXXXX";
-    cache_dir = tmpnam(templ);
-    mkdtemp(templ);
+    cache_dir = boost::filesystem::unique_path().string();
+    boost::filesystem::create_directories(cache_dir);
   }
 
   // Start futures before we connect so they can resolve
@@ -475,29 +478,7 @@ int main(int argc, char **argv) {
   wait_disconnect.wait();
 
   if (temp_cache) {
-    // Since C++ doesn't seem to have filesystem support yet lmao
-    std::function<void(const std::string &)> rmdir_rec;
-    rmdir_rec = [&rmdir_rec](const std::string &path) {
-      // What year is it
-      DIR *d = opendir(path.c_str());
-      dirent *ent = nullptr;
-      while ((ent = readdir(d)) != nullptr) {
-        if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0)
-          continue;
-
-        std::string full_path = path + "/" + ent->d_name;
-
-        if (ent->d_type == DT_DIR) {
-          rmdir_rec(full_path);
-        } else {
-          unlink(full_path.c_str());
-        }
-      }
-      closedir(d);
-      rmdir(path.c_str());
-    };
-
-    rmdir_rec(cache_dir);
+    boost::filesystem::remove_all(cache_dir);
   }
 
   fprintf(stderr, "Connection terminated\n");
