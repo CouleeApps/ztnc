@@ -14,7 +14,7 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-#include "ZeroTier.h"
+#include "ZeroTierSockets.h"
 #include <cstdio>
 #include <future>
 #include <mutex>
@@ -29,6 +29,7 @@
 #include <ws2def.h>
 #else
 #include <arpa/inet.h>
+#include <unistd.h>
 #endif
 #include <boost/program_options.hpp>
 #include <boost/filesystem.hpp>
@@ -179,15 +180,17 @@ public:
 
 MessageList<std::shared_ptr<ZtsCallbackMsg>> list{};
 
+//#define _DEBUG
 #ifdef _DEBUG
-#define DEBUGF printf
+#define DEBUGF(...) fprintf(stderr, __VA_ARGS__)
 bool debug = true;
 #else
 #define DEBUGF(...)
 bool debug = false;
 #endif
 
-void event_callback(struct zts_callback_msg *msg) {
+void event_callback(void *ptr) {
+  struct zts_callback_msg *msg = reinterpret_cast<struct zts_callback_msg *>(ptr);
   int received = list.on_message(std::make_shared<ZtsCallbackMsg>(msg));
 
   switch (msg->eventCode) {
@@ -214,9 +217,6 @@ void event_callback(struct zts_callback_msg *msg) {
     break;
   case ZTS_EVENT_NETWORK_CLIENT_TOO_OLD:
     DEBUGF("ZTS_EVENT_NETWORK_CLIENT_TOO_OLD\n");
-    break;
-  case ZTS_EVENT_NETWORK_REQUESTING_CONFIG:
-    DEBUGF("ZTS_EVENT_NETWORK_REQUESTING_CONFIG\n");
     break;
   case ZTS_EVENT_NETWORK_OK:
     DEBUGF("ZTS_EVENT_NETWORK_OK\n");
@@ -256,9 +256,6 @@ void event_callback(struct zts_callback_msg *msg) {
     break;
   case ZTS_EVENT_NETIF_LINK_DOWN:
     DEBUGF("ZTS_EVENT_NETIF_LINK_DOWN\n");
-    break;
-  case ZTS_EVENT_PEER_P2P:
-    DEBUGF("ZTS_EVENT_PEER_P2P\n");
     break;
   case ZTS_EVENT_PEER_RELAY:
     DEBUGF("ZTS_EVENT_PEER_RELAY\n");
@@ -323,7 +320,7 @@ void echo_server_client(int fd) {
     char buf[PACKET_SIZE];
     ssize_t length;
 
-    while ((length = fread(buf, 1, PACKET_SIZE, stdin)) > 0) {
+    while ((length = read(STDIN_FILENO, buf, PACKET_SIZE)) > 0) {
       buf[length] = 0;
       if (zts_write(fd, buf, length) != length) {
         perror("zts_write");
@@ -355,7 +352,7 @@ void print_usage(const char *argv0) {
   fprintf(stderr,
           "    %s [-n <network id>] [-c <cache dir>] <address> <port>\n",
           argv0);
-  fprintf(stderr, "    %s [-n <network id>] [-c <cache dir>] -l <port>\n",
+  fprintf(stderr, "    %s [-n <network id>] [-c <cache dir>] -p <port>\n",
           argv0);
 }
 
@@ -468,22 +465,22 @@ int main(int argc, char **argv) {
             inet_ntoa(my_addr->sin_addr), listen_port);
 
     // Listen on any addr (on zt)
-    sockaddr_in listen_addr;
+    zts_sockaddr_in listen_addr;
     listen_addr.sin_port = htons(listen_port);
     listen_addr.sin_addr.s_addr = INADDR_ANY;
     listen_addr.sin_family = AF_INET;
 
-    zts_bind(fd, (sockaddr *)&listen_addr, sizeof(sockaddr_in));
+    zts_bind(fd, (const zts_sockaddr *)&listen_addr, sizeof(sockaddr_in));
     zts_listen(fd, 10);
 
     // Wait for a client to connect
-    sockaddr_in client_addr;
+    zts_sockaddr_in client_addr;
     socklen_t client_len;
-    int client_fd = zts_accept(fd, (sockaddr *)&client_addr, &client_len);
+    int client_fd = zts_accept(fd, (zts_sockaddr *)&client_addr, &client_len);
     fprintf(stderr, "Established Connection\n");
     echo_server_client(client_fd);
   } else {
-    zts_connect(fd, (const sockaddr *)&connect_addr, sizeof(connect_addr));
+    zts_connect(fd, (const zts_sockaddr *)&connect_addr, sizeof(connect_addr));
     fprintf(stderr, "Established Connection\n");
     echo_server_client(fd);
   }
