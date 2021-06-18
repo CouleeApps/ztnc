@@ -31,154 +31,12 @@
 #include <arpa/inet.h>
 #include <unistd.h>
 #endif
-#include <boost/program_options.hpp>
 #include <boost/filesystem.hpp>
+#include <boost/program_options.hpp>
+#include <sys/fcntl.h>
 
 // Well within MTU
 #define PACKET_SIZE 1024
-
-// Message queue class with *futures*
-template <typename MsgType> class MessageList {
-public:
-  typedef std::function<bool(MsgType &)> test_fn_t;
-
-  // Await a message that satisfies the provided function
-  // Returns a future whose value will be the first message that passed the
-  // function
-  std::future<MsgType> expect(test_fn_t fn) {
-    auto m = std::make_unique<Message>(std::move(fn));
-
-    pending_list_mutex.lock();
-    pending_messages.push_back(std::move(m));
-    auto &message = pending_messages.back();
-    auto fut = message->fut.get_future();
-    pending_list_mutex.unlock();
-
-    return fut;
-  }
-
-  // Post receive of a message, testing against all pending expects
-  // Returns the number of expects that passed their test
-  int on_message(MsgType msg) {
-    int count = 0;
-    pending_list_mutex.lock();
-    for (auto it = pending_messages.begin(); it != pending_messages.end();) {
-      if ((*it)->test_fn(msg)) {
-        count += 1;
-        (*it)->fut.set_value(msg);
-        it = pending_messages.erase(it);
-      } else {
-        ++it;
-      }
-    }
-    pending_list_mutex.unlock();
-    return count;
-  }
-
-private:
-  struct Message {
-    std::promise<MsgType> fut;
-    test_fn_t test_fn;
-
-    explicit Message(test_fn_t &&fn) : test_fn(std::move(fn)) {}
-  };
-
-  std::recursive_mutex pending_list_mutex;
-  std::vector<std::unique_ptr<Message>> pending_messages;
-};
-
-// Wrapper class for libzt's structure type that we don't have ownership of
-// Copies a message into an internal reference and frees it on destruct
-class ZtsCallbackMsg {
-  zts_callback_msg *internal;
-
-  struct zts_callback_msg *copy_msg(zts_callback_msg *orig) {
-    zts_callback_msg *copy = new zts_callback_msg;
-    copy->eventCode = orig->eventCode;
-    if (orig->node) {
-      copy->node = new zts_node_details;
-      *copy->node = *orig->node;
-    } else {
-      copy->node = nullptr;
-    }
-    if (orig->network) {
-      copy->network = new zts_network_details;
-      *copy->network = *orig->network;
-    } else {
-      copy->network = nullptr;
-    }
-    if (orig->netif) {
-      copy->netif = new zts_netif_details;
-      *copy->netif = *orig->netif;
-    } else {
-      copy->netif = nullptr;
-    }
-    if (orig->route) {
-      copy->route = new zts_virtual_network_route;
-      *copy->route = *orig->route;
-    } else {
-      copy->route = nullptr;
-    }
-    if (orig->path) {
-      copy->path = new zts_physical_path;
-      *copy->path = *orig->path;
-    } else {
-      copy->path = nullptr;
-    }
-    if (orig->peer) {
-      copy->peer = new zts_peer_details;
-      *copy->peer = *orig->peer;
-    } else {
-      copy->peer = nullptr;
-    }
-    if (orig->addr) {
-      copy->addr = new zts_addr_details;
-      *copy->addr = *orig->addr;
-    } else {
-      copy->addr = nullptr;
-    }
-    return copy;
-  }
-
-public:
-  explicit ZtsCallbackMsg(zts_callback_msg *msg) { internal = copy_msg(msg); }
-
-  ~ZtsCallbackMsg() {
-    if (internal->node != nullptr) {
-      delete internal->node;
-      internal->node = nullptr;
-    }
-    if (internal->network != nullptr) {
-      delete internal->network;
-      internal->network = nullptr;
-    }
-    if (internal->netif != nullptr) {
-      delete internal->netif;
-      internal->netif = nullptr;
-    }
-    if (internal->route != nullptr) {
-      delete internal->route;
-      internal->route = nullptr;
-    }
-    if (internal->path != nullptr) {
-      delete internal->path;
-      internal->path = nullptr;
-    }
-    if (internal->peer != nullptr) {
-      delete internal->peer;
-      internal->peer = nullptr;
-    }
-    if (internal->addr != nullptr) {
-      delete internal->addr;
-      internal->addr = nullptr;
-    }
-    delete internal;
-  }
-
-  zts_callback_msg *operator->() const { return internal; }
-};
-
-MessageList<std::shared_ptr<ZtsCallbackMsg>> list{};
 
 //#define _DEBUG
 #ifdef _DEBUG
@@ -189,153 +47,86 @@ bool debug = true;
 bool debug = false;
 #endif
 
-void event_callback(void *ptr) {
-  struct zts_callback_msg *msg = reinterpret_cast<struct zts_callback_msg *>(ptr);
-  int received = list.on_message(std::make_shared<ZtsCallbackMsg>(msg));
+bool running = true;
 
-  switch (msg->eventCode) {
-  case ZTS_EVENT_NODE_OFFLINE:
-    DEBUGF("ZTS_EVENT_NODE_OFFLINE\n");
-    break;
-  case ZTS_EVENT_NODE_ONLINE:
-    DEBUGF("ZTS_EVENT_NODE_ONLINE\n");
-    break;
-  case ZTS_EVENT_NODE_DOWN:
-    DEBUGF("ZTS_EVENT_NODE_DOWN\n");
-    break;
-  case ZTS_EVENT_NODE_IDENTITY_COLLISION:
-    DEBUGF("ZTS_EVENT_NODE_IDENTITY_COLLISION\n");
-    break;
-  case ZTS_EVENT_NODE_UNRECOVERABLE_ERROR:
-    DEBUGF("ZTS_EVENT_NODE_UNRECOVERABLE_ERROR\n");
-    break;
-  case ZTS_EVENT_NODE_NORMAL_TERMINATION:
-    DEBUGF("ZTS_EVENT_NODE_NORMAL_TERMINATION\n");
-    break;
-  case ZTS_EVENT_NETWORK_NOT_FOUND:
-    DEBUGF("ZTS_EVENT_NETWORK_NOT_FOUND\n");
-    break;
-  case ZTS_EVENT_NETWORK_CLIENT_TOO_OLD:
-    DEBUGF("ZTS_EVENT_NETWORK_CLIENT_TOO_OLD\n");
-    break;
-  case ZTS_EVENT_NETWORK_OK:
-    DEBUGF("ZTS_EVENT_NETWORK_OK\n");
-    break;
-  case ZTS_EVENT_NETWORK_ACCESS_DENIED:
-    DEBUGF("ZTS_EVENT_NETWORK_ACCESS_DENIED\n");
-    break;
-  case ZTS_EVENT_NETWORK_READY_IP4:
-    DEBUGF("ZTS_EVENT_NETWORK_READY_IP4\n");
-    break;
-  case ZTS_EVENT_NETWORK_READY_IP6:
-    DEBUGF("ZTS_EVENT_NETWORK_READY_IP6\n");
-    break;
-  case ZTS_EVENT_NETWORK_READY_IP4_IP6:
-    DEBUGF("ZTS_EVENT_NETWORK_READY_IP4_IP6\n");
-    break;
-  case ZTS_EVENT_NETWORK_DOWN:
-    DEBUGF("ZTS_EVENT_NETWORK_DOWN\n");
-    break;
-  case ZTS_EVENT_STACK_UP:
-    DEBUGF("ZTS_EVENT_STACK_UP\n");
-    break;
-  case ZTS_EVENT_STACK_DOWN:
-    DEBUGF("ZTS_EVENT_STACK_DOWN\n");
-    break;
-  case ZTS_EVENT_NETIF_UP:
-    DEBUGF("ZTS_EVENT_NETIF_UP\n");
-    break;
-  case ZTS_EVENT_NETIF_DOWN:
-    DEBUGF("ZTS_EVENT_NETIF_DOWN\n");
-    break;
-  case ZTS_EVENT_NETIF_REMOVED:
-    DEBUGF("ZTS_EVENT_NETIF_REMOVED\n");
-    break;
-  case ZTS_EVENT_NETIF_LINK_UP:
-    DEBUGF("ZTS_EVENT_NETIF_LINK_UP\n");
-    break;
-  case ZTS_EVENT_NETIF_LINK_DOWN:
-    DEBUGF("ZTS_EVENT_NETIF_LINK_DOWN\n");
-    break;
-  case ZTS_EVENT_PEER_RELAY:
-    DEBUGF("ZTS_EVENT_PEER_RELAY\n");
-    break;
-  case ZTS_EVENT_PEER_UNREACHABLE:
-    DEBUGF("ZTS_EVENT_PEER_UNREACHABLE\n");
-    break;
-  case ZTS_EVENT_PATH_DISCOVERED:
-    DEBUGF("ZTS_EVENT_PATH_DISCOVERED\n");
-    break;
-  case ZTS_EVENT_PATH_ALIVE:
-    DEBUGF("ZTS_EVENT_PATH_ALIVE\n");
-    break;
-  case ZTS_EVENT_PATH_DEAD:
-    DEBUGF("ZTS_EVENT_PATH_DEAD\n");
-    break;
-  case ZTS_EVENT_ROUTE_ADDED:
-    DEBUGF("ZTS_EVENT_ROUTE_ADDED\n");
-    break;
-  case ZTS_EVENT_ROUTE_REMOVED:
-    DEBUGF("ZTS_EVENT_ROUTE_REMOVED\n");
-    break;
-  case ZTS_EVENT_ADDR_ADDED_IP4:
-    DEBUGF("ZTS_EVENT_ADDR_ADDED_IP4\n");
-    break;
-  case ZTS_EVENT_ADDR_REMOVED_IP4:
-    DEBUGF("ZTS_EVENT_ADDR_REMOVED_IP4\n");
-    break;
-  case ZTS_EVENT_ADDR_ADDED_IP6:
-    DEBUGF("ZTS_EVENT_ADDR_ADDED_IP6\n");
-    break;
-  case ZTS_EVENT_ADDR_REMOVED_IP6:
-    DEBUGF("ZTS_EVENT_ADDR_REMOVED_IP6\n");
-    break;
-  }
-  if (received > 0) {
-    DEBUGF("Processed by %d callbacks\n", received);
-  }
-}
-
-MessageList<bool> threadList;
-
-void sigint_handler(int) { threadList.on_message(true); }
+void sigint_handler(int) { running = false; }
 
 void echo_server_client(int fd) {
-  auto awaiting = threadList.expect([](bool) { return true; });
+  struct timeval timeout{};
+  timeout.tv_sec = 0;
+  timeout.tv_usec = 100000;
 
-  std::thread([fd]() {
+//  zts_bsd_fcntl(fd, ZTS_F_SETFL, zts_bsd_fcntl(fd, ZTS_F_GETFL, 0) | ZTS_O_NONBLOCK);
+  zts_bsd_setsockopt(fd, ZTS_SOL_SOCKET, ZTS_SO_RCVTIMEO, &timeout, sizeof(struct timeval));
+
+  std::thread fd_thread = std::thread([fd]() {
     DEBUGF("Starting fd_thread\n");
     char buf[PACKET_SIZE];
     ssize_t length;
-    while ((length = zts_read(fd, buf, PACKET_SIZE)) > 0) {
-      fwrite(buf, 1, length, stdout);
+    while (running && (length = zts_bsd_read(fd, buf, PACKET_SIZE)) != 0) {
+      if (length < 0) {
+        if (zts_errno == ZTS_EAGAIN)
+          continue;
+        break;
+      }
+      if (fwrite(buf, 1, length, stdout) < length) {
+        perror("fwrite");
+        break;
+      }
     }
-    zts_close(fd);
-    threadList.on_message(true);
+    running = false;
     DEBUGF("Finishing fd_thread\n");
-  }).detach();
+  });
 
-  std::thread([fd]() {
+  std::thread stdin_thread = std::thread([fd]() {
     DEBUGF("Starting stdin_thread\n");
     char buf[PACKET_SIZE];
     ssize_t length;
 
-    while ((length = read(STDIN_FILENO, buf, PACKET_SIZE)) > 0) {
+    while (running) {
+      fd_set fds;
+      FD_ZERO(&fds);
+      FD_SET(STDIN_FILENO, &fds);
+
+      struct timeval timeout{};
+      timeout.tv_sec = 0;
+      timeout.tv_usec = 100000;
+
+      int ret = select(1, &fds, nullptr, nullptr, &timeout);
+      if (ret == -1) {
+        perror("select");
+        break;
+      }
+      if (ret == 0) {
+        continue;
+      }
+      length = read(STDIN_FILENO, buf, PACKET_SIZE);
+      if (length <= 0) {
+        break;
+      }
       buf[length] = 0;
       if (zts_write(fd, buf, length) != length) {
         perror("zts_write");
-        return;
+        break;
       }
     }
-    zts_close(fd);
-    threadList.on_message(true);
+    running = false;
     DEBUGF("Finishing stdin_thread\n");
-  }).detach();
+  });
 
   signal(SIGINT, &sigint_handler);
 
   DEBUGF("Spawning read threads\n");
-  awaiting.wait();
+
+  while (running) {
+    usleep(100000);
+  }
+
+  fd_thread.join();
+  stdin_thread.join();
+
+  zts_close(fd);
+
   DEBUGF("Read threads finished\n");
 }
 
@@ -418,51 +209,53 @@ int main(int argc, char **argv) {
     boost::filesystem::create_directories(cache_dir);
   }
 
-  // Start futures before we connect so they can resolve
-  auto wait_online = list.expect([](std::shared_ptr<ZtsCallbackMsg> &msg) {
-    return (*msg)->eventCode == ZTS_EVENT_NODE_ONLINE;
-  });
-  auto wait_ip4 = list.expect([nwid](std::shared_ptr<ZtsCallbackMsg> &msg) {
-    return (*msg)->eventCode == ZTS_EVENT_ADDR_ADDED_IP4 &&
-           (*msg)->addr->nwid == nwid;
-  });
-  auto wait_ip4_ready = list.expect([](std::shared_ptr<ZtsCallbackMsg> &msg) {
-    return (*msg)->eventCode == ZTS_EVENT_NETWORK_READY_IP4;
-  });
-  auto wait_disconnect = list.expect([](std::shared_ptr<ZtsCallbackMsg> &msg) {
-    return (*msg)->eventCode == ZTS_EVENT_NODE_DOWN;
-  });
+  // Initialize node
+  TRY(zts_init_from_storage(cache_dir.c_str()));
 
-  fprintf(stderr, "Connecting to ZeroTier...\n");
+  // Start node
+  TRY(zts_node_start());
 
-  TRY(zts_start(cache_dir.c_str(), &event_callback, 9994));
-  wait_online.wait();
+  fprintf(stderr, "Connecting...\n");
 
-  fprintf(stderr, "Joining Network...\n");
-  TRY(zts_join(nwid));
+  DEBUGF("Waiting for node to come online\n");
+  while (! zts_node_is_online()) {
+    zts_util_delay(50);
+  }
+  DEBUGF("Public identity (node ID) is %llx\n", zts_node_get_id());
 
-  // Wait until we have an ipv4
-  wait_ip4.wait();
+  // Join network
 
-  // Get our ipv4 from the network
-  auto v = wait_ip4.get();
-  sockaddr_in *my_addr = (sockaddr_in *)&(*v)->addr->addr;
-  uint64_t my_id = zts_get_node_id();
+  fprintf(stderr, "Joining network...\n");
+  DEBUGF("Joining network %llx\n", nwid);
+  if (zts_net_join(nwid) != ZTS_ERR_OK) {
+    DEBUGF("Unable to join network. Exiting.\n");
+    exit(1);
+  }
+  DEBUGF("Don't forget to authorize this device in my.zerotier.com or the web API!\n");
+  DEBUGF("Waiting for join to complete\n");
+  while (!zts_net_transport_is_ready(nwid)) {
+    zts_util_delay(50);
+  }
+
+  fprintf(stderr, "Getting ip address...\n");
+
+  DEBUGF("Waiting for address assignment from network\n");
+  while (!zts_addr_is_assigned(nwid, ZTS_AF_INET)) {
+    zts_util_delay(50);
+  }
+  char ipstr[ZTS_IP_MAX_STR_LEN] = { 0 };
+  zts_addr_get_str(nwid, ZTS_AF_INET, ipstr, ZTS_IP_MAX_STR_LEN);
+  DEBUGF("IP address on network %llx is %s\n", nwid, ipstr);
 
   DEBUGF("Node ID: %16llx\n", my_id);
   DEBUGF("Address: %s\n", inet_ntoa(my_addr->sin_addr));
   DEBUGF("Status: %x\n", zts_get_node_status());
 
-  // Wait for network ready
-  fprintf(stderr, "Waiting for Network...\n");
-  wait_ip4_ready.wait();
-
-  int fd = zts_socket(ZTS_AF_INET, ZTS_SOCK_STREAM, 0);
+  int fd = zts_bsd_socket(ZTS_AF_INET, ZTS_SOCK_STREAM, 0);
 
   if (listen) {
     // Tell the user where they are listening
-    fprintf(stderr, "Listening at (%llx) %s:%d\n", nwid,
-            inet_ntoa(my_addr->sin_addr), listen_port);
+    fprintf(stderr, "Listening on %s:%hu\n", ipstr, listen_port);
 
     // Listen on any addr (on zt)
     zts_sockaddr_in listen_addr;
@@ -470,25 +263,24 @@ int main(int argc, char **argv) {
     listen_addr.sin_addr.s_addr = INADDR_ANY;
     listen_addr.sin_family = AF_INET;
 
-    zts_bind(fd, (const zts_sockaddr *)&listen_addr, sizeof(sockaddr_in));
+    zts_bsd_bind(fd, (const zts_sockaddr *)&listen_addr, sizeof(sockaddr_in));
     zts_listen(fd, 10);
 
     // Wait for a client to connect
     zts_sockaddr_in client_addr;
     socklen_t client_len;
-    int client_fd = zts_accept(fd, (zts_sockaddr *)&client_addr, &client_len);
+    int client_fd = zts_bsd_accept(fd, (zts_sockaddr *)&client_addr, &client_len);
     fprintf(stderr, "Established Connection\n");
     echo_server_client(client_fd);
   } else {
-    zts_connect(fd, (const zts_sockaddr *)&connect_addr, sizeof(connect_addr));
+    zts_bsd_connect(fd, (const zts_sockaddr *)&connect_addr, sizeof(connect_addr));
     fprintf(stderr, "Established Connection\n");
     echo_server_client(fd);
   }
 
   // Disconnect like a good peer
   fprintf(stderr, "Disconnecting...\n");
-  TRY(zts_stop());
-  wait_disconnect.wait();
+  TRY(zts_node_stop());
 
   if (temp_cache) {
     boost::filesystem::remove_all(cache_dir);
